@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { Chess } from 'chess.js';
 import ChessBoard from '@/components/ChessBoard';
@@ -26,6 +26,11 @@ export default function GamePage() {
   const [selectedSquare, setSelectedSquare] = useState(null);
   const [legalTargets, setLegalTargets] = useState([]);
   const [pendingPromotion, setPendingPromotion] = useState(null);
+  const gameRef = useRef(null);
+
+  useEffect(() => {
+    gameRef.current = game;
+  }, [game]);
 
   const myColor = useMemo(() => {
     if (!game || !session) return null;
@@ -54,6 +59,7 @@ export default function GamePage() {
       },
     });
 
+    gameRef.current = result.game;
     setGame(result.game);
     return currentSession;
   }, [gameId]);
@@ -66,11 +72,35 @@ export default function GamePage() {
     function applyRemoteGame(nextGame) {
       if (cancelled || !nextGame) return;
 
-      setGame((current) => {
-        if (!current) return nextGame;
+      const current = gameRef.current;
+
+      // Polling runs frequently. If the server returned the exact same game
+      // snapshot, do nothing so the user's selected piece/legal-move dots stay
+      // visible while they are choosing a destination square.
+      if (current) {
+        const currentVersion = current.version ?? 0;
+        const nextVersion = nextGame.version ?? 0;
+
         // Never replace a newer local state with an older response.
-        return (nextGame.version ?? 0) >= (current.version ?? 0) ? nextGame : current;
-      });
+        if (nextVersion < currentVersion) return;
+
+        const sameSnapshot =
+          nextVersion === currentVersion &&
+          nextGame.fen === current.fen &&
+          nextGame.status === current.status &&
+          nextGame.turn === current.turn &&
+          nextGame.black_player_id === current.black_player_id &&
+          nextGame.winner_id === current.winner_id &&
+          nextGame.last_move === current.last_move;
+
+        if (sameSnapshot) return;
+      }
+
+      gameRef.current = nextGame;
+      setGame(nextGame);
+
+      // Only clear board interaction when the actual remote game state changed
+      // (opponent moved, player joined, game ended, etc.).
       setSelectedSquare(null);
       setLegalTargets([]);
       setPendingPromotion(null);
@@ -158,6 +188,7 @@ export default function GamePage() {
         body: JSON.stringify({ from, to, promotion }),
       });
 
+      gameRef.current = result.game;
       setGame(result.game);
       setSelectedSquare(null);
       setLegalTargets([]);
@@ -225,6 +256,7 @@ export default function GamePage() {
         method: 'POST',
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
+      gameRef.current = result.game;
       setGame(result.game);
     } catch (err) {
       setError(err.message);

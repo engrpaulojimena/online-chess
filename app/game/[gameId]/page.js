@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { Chess } from 'chess.js';
 import ChessBoard from '@/components/ChessBoard';
-import { ensureAnonymousSession, getSupabaseBrowser } from '@/lib/supabase-browser';
+import { ensureAnonymousSession, getActiveSession, getSupabaseBrowser } from '@/lib/supabase-browser';
 import { fetchJson } from '@/lib/api-client';
 
 function parseLastMove(value) {
@@ -73,45 +73,70 @@ export default function GamePage() {
       if (cancelled || !nextGame) return;
 
       const current = gameRef.current;
+      let boardPositionChanged = false;
 
-      // Polling runs frequently. If the server returned the exact same game
-      // snapshot, do nothing so the user's selected piece/legal-move dots stay
-      // visible while they are choosing a destination square.
+      // Realtime and polling can return the SAME chess position with slightly
+      // different metadata (for example version representation / delivery order).
+      // That must never wipe the selected piece, especially on the Black board.
       if (current) {
-        const currentVersion = current.version ?? 0;
-        const nextVersion = nextGame.version ?? 0;
+        const currentVersion = Number(current.version ?? 0);
+        const nextVersion = Number(nextGame.version ?? 0);
 
-        // Never replace a newer local state with an older response.
-        if (nextVersion < currentVersion) return;
+        // Never replace a clearly newer local position with an older response.
+        if (Number.isFinite(currentVersion) && Number.isFinite(nextVersion) && nextVersion < currentVersion) {
+          return;
+        }
 
-        const sameSnapshot =
-          nextVersion === currentVersion &&
-          nextGame.fen === current.fen &&
-          nextGame.status === current.status &&
-          nextGame.turn === current.turn &&
+        boardPositionChanged =
+          nextGame.fen !== current.fen ||
+          nextGame.turn !== current.turn ||
+          nextGame.status !== current.status;
+
+        const sameVisibleState =
+          !boardPositionChanged &&
           nextGame.black_player_id === current.black_player_id &&
+          nextGame.white_player_id === current.white_player_id &&
           nextGame.winner_id === current.winner_id &&
-          nextGame.last_move === current.last_move;
+          nextGame.last_move === current.last_move &&
+          nextGame.pgn === current.pgn;
 
-        if (sameSnapshot) return;
+        // Ignore duplicate sync packets. Version alone is NOT a reason to
+        // re-render/clear the board selection.
+        if (sameVisibleState) {
+          if (nextVersion > currentVersion) {
+            const merged = { ...current, ...nextGame };
+            gameRef.current = merged;
+            setGame(merged);
+          }
+          return;
+        }
+      } else {
+        boardPositionChanged = true;
       }
 
       gameRef.current = nextGame;
       setGame(nextGame);
 
-      // Only clear board interaction when the actual remote game state changed
-      // (opponent moved, player joined, game ended, etc.).
-      setSelectedSquare(null);
-      setLegalTargets([]);
-      setPendingPromotion(null);
+      // Clear source/target selection ONLY if the actual chess position changed
+      // (a move arrived, turn changed, restart, or the game ended). Metadata-only
+      // sync packets no longer make Black's legal-move dots disappear.
+      if (boardPositionChanged) {
+        setSelectedSquare(null);
+        setLegalTargets([]);
+        setPendingPromotion(null);
+      }
     }
 
-    async function refreshGame(currentSession) {
+    async function refreshGame() {
       try {
+        const activeSession = await getActiveSession();
+        // Do not replace React session state on every poll. The user identity
+        // does not change when Supabase refreshes the access token, and avoiding
+        // this removes unnecessary board re-renders while choosing a move.
         const result = await fetchJson(`/api/games/${encodeURIComponent(gameId)}`, {
           method: 'GET',
           headers: {
-            Authorization: `Bearer ${currentSession.access_token}`,
+            Authorization: `Bearer ${activeSession.access_token}`,
           },
           cache: 'no-store',
         });
@@ -155,8 +180,8 @@ export default function GamePage() {
         // publication has not been enabled yet. This also makes testing
         // across Chrome + Edge reliable.
         pollTimer = window.setInterval(() => {
-          refreshGame(currentSession);
-        }, 800);
+          refreshGame();
+        }, 1200);
       } catch (err) {
         if (!cancelled) setError(err.message);
       } finally {
@@ -179,11 +204,13 @@ export default function GamePage() {
     setError('');
 
     try {
+      const activeSession = await getActiveSession();
+      setSession(activeSession);
       const result = await fetchJson(`/api/games/${encodeURIComponent(gameId)}/move`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${session.access_token}`,
+          Authorization: `Bearer ${activeSession.access_token}`,
         },
         body: JSON.stringify({ from, to, promotion }),
       });
@@ -252,12 +279,50 @@ export default function GamePage() {
     setError('');
 
     try {
+      const activeSession = await getActiveSession();
+      setSession(activeSession);
       const result = await fetchJson(`/api/games/${encodeURIComponent(gameId)}/resign`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${session.access_token}` },
+        headers: { Authorization: `Bearer ${activeSession.access_token}` },
       });
       gameRef.current = result.game;
       setGame(result.game);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+
+  async function restartGame() {
+    if (!session || !game || !['checkmate', 'draw', 'resigned'].includes(game.status) || busy) return;
+
+    const confirmed = window.confirm(
+      'Start a new round with the same two players and the same invite link?',
+    );
+    if (!confirmed) return;
+
+    setBusy(true);
+    setError('');
+    setNotice('');
+
+    try {
+      const activeSession = await getActiveSession();
+      setSession(activeSession);
+
+      const result = await fetchJson(`/api/games/${encodeURIComponent(gameId)}/restart`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${activeSession.access_token}` },
+      });
+
+      gameRef.current = result.game;
+      setGame(result.game);
+      setSelectedSquare(null);
+      setLegalTargets([]);
+      setPendingPromotion(null);
+      setNotice('New round started — same link, same players.');
+      window.setTimeout(() => setNotice(''), 2200);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -361,6 +426,17 @@ export default function GamePage() {
 
         {game.status === 'active' ? (
           <button className="danger-button" onClick={resign} disabled={busy}>Resign Game</button>
+        ) : null}
+
+        {['checkmate', 'draw', 'resigned'].includes(game.status) ? (
+          <button
+            className="primary-button"
+            style={{ width: '100%' }}
+            onClick={restartGame}
+            disabled={busy}
+          >
+            {busy ? 'Starting new round…' : 'Play Again — Same Link'}
+          </button>
         ) : null}
 
         {notice ? <div className="toast">{notice}</div> : null}

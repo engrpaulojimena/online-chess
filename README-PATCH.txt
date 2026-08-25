@@ -1,19 +1,13 @@
-ONLINE CHESS REALISTIC BOARD + CAPTURED PIECES PATCH
+ONLINE CHESS RUNTIME FIX
 
-Overwrite these files in your project:
-- app/game/[gameId]/page.js
-- components/ChessBoard.js
-- app/globals.css
+Fixes the captured-pieces runtime crash caused by using chess.SQUARES from a Chess instance.
 
-Then restart:
-  Ctrl + C
-  npm run dev
+Overwrite:
+  app/game/[gameId]/page.js
 
-If deployed on Vercel, redeploy after replacing the files.
+Then:
+  git add .
+  git commit -m "Fix captured pieces runtime crash"
+  git push
 
-What this patch adds:
-- more realistic-looking chess pieces using SVG piece artwork
-- wood-style board frame and more polished board styling
-- captured enemy pieces shown in the sidebar
-- material score chips (example: +3)
-- keeps same-link restart support already built into the game page
+Vercel should redeploy automatically.

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
-import { Chess } from 'chess.js';
+import { Chess, SQUARES } from 'chess.js';
 import ChessBoard, { PIECE_IMAGES } from '@/components/ChessBoard';
 import { ensureAnonymousSession, getActiveSession, getSupabaseBrowser } from '@/lib/supabase-browser';
 import { fetchJson } from '@/lib/api-client';
@@ -31,7 +31,7 @@ function getCapturedPieces(fen) {
     black: { p: 0, n: 0, b: 0, r: 0, q: 0, k: 0 },
   };
 
-  for (const square of chess.SQUARES) {
+  for (const square of SQUARES) {
     const piece = chess.get(square);
     if (piece) counts[piece.color === 'w' ? 'white' : 'black'][piece.type] += 1;
   }

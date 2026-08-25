@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { Chess } from 'chess.js';
-import ChessBoard from '@/components/ChessBoard';
+import ChessBoard, { PIECE_IMAGES } from '@/components/ChessBoard';
 import { ensureAnonymousSession, getActiveSession, getSupabaseBrowser } from '@/lib/supabase-browser';
 import { fetchJson } from '@/lib/api-client';
 
@@ -11,6 +11,69 @@ function parseLastMove(value) {
   if (!value || !value.includes('-')) return null;
   const [from, to] = value.split('-');
   return { from, to };
+}
+
+const INITIAL_COUNTS = {
+  white: { p: 8, n: 2, b: 2, r: 2, q: 1, k: 1 },
+  black: { p: 8, n: 2, b: 2, r: 2, q: 1, k: 1 },
+};
+
+const CAPTURE_ORDER = ['q', 'r', 'b', 'n', 'p'];
+
+function getCapturedPieces(fen) {
+  if (!fen) {
+    return { capturedByWhite: [], capturedByBlack: [] };
+  }
+
+  const chess = new Chess(fen);
+  const counts = {
+    white: { p: 0, n: 0, b: 0, r: 0, q: 0, k: 0 },
+    black: { p: 0, n: 0, b: 0, r: 0, q: 0, k: 0 },
+  };
+
+  for (const square of chess.SQUARES) {
+    const piece = chess.get(square);
+    if (piece) counts[piece.color === 'w' ? 'white' : 'black'][piece.type] += 1;
+  }
+
+  const capturedByWhite = [];
+  const capturedByBlack = [];
+
+  for (const type of CAPTURE_ORDER) {
+    const missingBlack = Math.max(0, INITIAL_COUNTS.black[type] - counts.black[type]);
+    const missingWhite = Math.max(0, INITIAL_COUNTS.white[type] - counts.white[type]);
+
+    for (let i = 0; i < missingBlack; i += 1) capturedByWhite.push(`b${type}`);
+    for (let i = 0; i < missingWhite; i += 1) capturedByBlack.push(`w${type}`);
+  }
+
+  return { capturedByWhite, capturedByBlack };
+}
+
+function materialValue(pieceKey) {
+  const type = pieceKey[1];
+  return { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 }[type] ?? 0;
+}
+
+function CapturedRow({ title, pieces }) {
+  const score = pieces.reduce((sum, piece) => sum + materialValue(piece), 0);
+
+  return (
+    <div className="capture-row">
+      <div className="capture-row-head">
+        <strong>{title}</strong>
+        {score > 0 ? <span className="material-chip">+{score}</span> : null}
+      </div>
+
+      <div className="captured-strip">
+        {pieces.length ? pieces.map((pieceKey, index) => (
+          <span key={`${pieceKey}-${index}`} className="captured-piece-chip" title={pieceKey}>
+            <img src={PIECE_IMAGES[pieceKey]} alt="captured chess piece" draggable="false" />
+          </span>
+        )) : <span className="capture-empty">No captures yet</span>}
+      </div>
+    </div>
+  );
 }
 
 export default function GamePage() {
@@ -44,6 +107,8 @@ export default function GamePage() {
     return new Chess(game.fen);
   }, [game?.fen]);
 
+  const captures = useMemo(() => getCapturedPieces(game?.fen), [game?.fen]);
+
   const isMyTurn = Boolean(
     game && myColor && game.status === 'active' && game.turn === myColor,
   );
@@ -75,14 +140,10 @@ export default function GamePage() {
       const current = gameRef.current;
       let boardPositionChanged = false;
 
-      // Realtime and polling can return the SAME chess position with slightly
-      // different metadata (for example version representation / delivery order).
-      // That must never wipe the selected piece, especially on the Black board.
       if (current) {
         const currentVersion = Number(current.version ?? 0);
         const nextVersion = Number(nextGame.version ?? 0);
 
-        // Never replace a clearly newer local position with an older response.
         if (Number.isFinite(currentVersion) && Number.isFinite(nextVersion) && nextVersion < currentVersion) {
           return;
         }
@@ -100,8 +161,6 @@ export default function GamePage() {
           nextGame.last_move === current.last_move &&
           nextGame.pgn === current.pgn;
 
-        // Ignore duplicate sync packets. Version alone is NOT a reason to
-        // re-render/clear the board selection.
         if (sameVisibleState) {
           if (nextVersion > currentVersion) {
             const merged = { ...current, ...nextGame };
@@ -117,9 +176,6 @@ export default function GamePage() {
       gameRef.current = nextGame;
       setGame(nextGame);
 
-      // Clear source/target selection ONLY if the actual chess position changed
-      // (a move arrived, turn changed, restart, or the game ended). Metadata-only
-      // sync packets no longer make Black's legal-move dots disappear.
       if (boardPositionChanged) {
         setSelectedSquare(null);
         setLegalTargets([]);
@@ -130,9 +186,6 @@ export default function GamePage() {
     async function refreshGame() {
       try {
         const activeSession = await getActiveSession();
-        // Do not replace React session state on every poll. The user identity
-        // does not change when Supabase refreshes the access token, and avoiding
-        // this removes unnecessary board re-renders while choosing a move.
         const result = await fetchJson(`/api/games/${encodeURIComponent(gameId)}`, {
           method: 'GET',
           headers: {
@@ -142,8 +195,6 @@ export default function GamePage() {
         });
         applyRemoteGame(result.game);
       } catch (err) {
-        // Realtime remains the primary path. Polling is only a fallback,
-        // so a temporary network error should not break the board.
         console.warn('Game sync retry failed:', err);
       }
     }
@@ -176,9 +227,6 @@ export default function GamePage() {
             }
           });
 
-        // Fallback sync for local/dev setups or projects where Realtime
-        // publication has not been enabled yet. This also makes testing
-        // across Chrome + Edge reliable.
         pollTimer = window.setInterval(() => {
           refreshGame();
         }, 1200);
@@ -294,7 +342,6 @@ export default function GamePage() {
     }
   }
 
-
   async function restartGame() {
     if (!session || !game || !['checkmate', 'draw', 'resigned'].includes(game.status) || busy) return;
 
@@ -347,6 +394,9 @@ export default function GamePage() {
       : 'Opponent won'
     : null;
 
+  const myCaptures = myColor === 'black' ? captures.capturedByBlack : captures.capturedByWhite;
+  const opponentCaptures = myColor === 'black' ? captures.capturedByWhite : captures.capturedByBlack;
+
   let statusText = 'Waiting for opponent';
   if (game.status === 'active') statusText = isMyTurn ? 'Your turn' : "Opponent's turn";
   if (game.status === 'checkmate') statusText = winnerText ? `${winnerText} by checkmate` : 'Checkmate';
@@ -364,15 +414,17 @@ export default function GamePage() {
           <button className="secondary-button" onClick={copyInvite}>Copy Invite Link</button>
         </div>
 
-        <ChessBoard
-          fen={game.fen}
-          orientation={myColor || 'white'}
-          selectedSquare={selectedSquare}
-          legalTargets={legalTargets}
-          lastMove={lastMove}
-          onSquareClick={selectSquare}
-          disabled={!isMyTurn || busy}
-        />
+        <div className="board-stage">
+          <ChessBoard
+            fen={game.fen}
+            orientation={myColor || 'white'}
+            selectedSquare={selectedSquare}
+            legalTargets={legalTargets}
+            lastMove={lastMove}
+            onSquareClick={selectSquare}
+            disabled={!isMyTurn || busy}
+          />
+        </div>
 
         {pendingPromotion ? (
           <div className="promotion-panel">
@@ -405,10 +457,32 @@ export default function GamePage() {
           </div>
         </div>
 
+        {['checkmate', 'draw', 'resigned'].includes(game.status) ? (
+          <div style={{ display: 'grid', gap: 8 }}>
+            <button
+              className="primary-button"
+              style={{ width: '100%' }}
+              onClick={restartGame}
+              disabled={busy}
+            >
+              {busy ? 'Restarting…' : 'Restart Game — Same Link'}
+            </button>
+            <small style={{ opacity: 0.7, textAlign: 'center' }}>
+              Same room, same White/Black players. No new invite link needed.
+            </small>
+          </div>
+        ) : null}
+
         <div className="info-card">
           <div className="info-row"><span>You are</span><strong>{myColor || '—'}</strong></div>
           <div className="info-row"><span>Turn</span><strong>{game.turn}</strong></div>
           <div className="info-row"><span>Game ID</span><code>{game.id.slice(0, 8)}…</code></div>
+        </div>
+
+        <div className="captures-card">
+          <span className="eyebrow">CAPTURED PIECES</span>
+          <CapturedRow title="You captured" pieces={myCaptures} />
+          <CapturedRow title="Opponent captured" pieces={opponentCaptures} />
         </div>
 
         {game.status === 'waiting' ? (
@@ -426,17 +500,6 @@ export default function GamePage() {
 
         {game.status === 'active' ? (
           <button className="danger-button" onClick={resign} disabled={busy}>Resign Game</button>
-        ) : null}
-
-        {['checkmate', 'draw', 'resigned'].includes(game.status) ? (
-          <button
-            className="primary-button"
-            style={{ width: '100%' }}
-            onClick={restartGame}
-            disabled={busy}
-          >
-            {busy ? 'Starting new round…' : 'Play Again — Same Link'}
-          </button>
         ) : null}
 
         {notice ? <div className="toast">{notice}</div> : null}
